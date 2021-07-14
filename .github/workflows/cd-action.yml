@@ -1,0 +1,54 @@
+name: Continous Deploy
+
+# Only trigger, when the build workflow succeeded
+on:
+  workflow_run:
+    workflows: ["CI build"]
+    types:
+      - completed
+
+env:
+  AKASH_HOME: /home/runner/.akash
+  AKASH_NODE: tcp://rpc0.mainnet.akash.network:26657
+  AKASH_GAS: auto
+  AKASH_GAS_ADJUSTMENT: 1.15
+  AKASH_GAS_PRICES: 0.025uakt
+  AKASH_SIGN_MODE: amino-json
+  AKASH_CHAIN_ID: akashnet-2
+  AKASH_FROM: e2e-production-github
+  AKASH_KEYRING_BACKEND: test
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    container:
+        image: gambitcajun/akash-e2e-runner:latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: import key
+        run: |-
+          echo "${{secrets.DEPLOY_KEY}}" > key.key
+          echo "${{secrets.DEPLOY_TOKEN}}" | akash keys import ${{env.AKASH_FROM}} key.key
+          rm key.key
+      - name: import certificate
+        run: echo "${{secrets.DEPLOY_CERT}}" > ${{env.AKASH_HOME}}/$(akash keys show ${{env.AKASH_FROM}} --output=json | jq -r ".address").pem
+      - name: close all active deployments
+        run: |-
+          akash query deployment list --owner "$(akash keys show "${{env.AKASH_FROM}}" -a)" --state active -o json --limit 1000 | \
+            jq -r '.deployments[].deployment|select(.state == "active")|.deployment_id.dseq' | \
+              while read dseq; do
+                akash tx deployment close --from "${{env.AKASH_FROM}}" --dseq "$dseq" --broadcast-mode sync --yes
+                sleep 15
+              done
+      - name: add tor keys to deployment
+        run: |-
+          sed 's|WHICHNET=|&${{ secrets.WHICHNET }}|' -i manifests/akash-deploy.yaml
+          sed 's|KEYPW=|&${{ secrets.KEYPW }}|' -i manifests/akash-deploy.yaml
+          sed 's|LIQUIDATOR_ADDRESS=|&${{ secrets.LIQUIDATOR_ADDRESS }}|' -i manifests/akash-deploy.yaml
+          sed 's|LIQUIDATOR_PRIVATE_KEY=|&${{ secrets.LIQUIDATOR_PRIVATE_KEY }}|' -i manifests/akash-deploy.yaml
+          sed 's|ROLLOVER_ADDRESS=|&${{ secrets.ROLLOVER_ADDRESS }}|' -i manifests/akash-deploy.yaml
+          sed 's|ROLLOVER_PRIVATE_KEY=|&${{ secrets.ROLLOVER_PRIVATE_KEY }}|' -i manifests/akash-deploy.yaml
+          sed 's|ARBITRAGE_ADDRESS=|&${{ secrets.ARBITRAGE_ADDRESS }}|' -i manifests/akash-deploy.yaml
+          sed 's|ARBITRAGE_PRIVATE_KEY=|&${{ secrets.ARBITRAGE_PRIVATE_KEY }}|' -i manifests/akash-deploy.yaml
+          sed 's|TELEGRAM_BOT_KEY=|&${{ secrets.TELEGRAM_BOT_KEY }}|' -i manifests/akash-deploy.yaml
+      - name: running test
+        run: e2e manifests/akash-deploy.yaml --skip-teardown=true --chain-id=${{env.AKASH_CHAIN_ID}} --keyring-backend=${{env.AKASH_KEYRING_BACKEND}} --home=${{env.AKASH_HOME}} --node=${{env.AKASH_NODE}} --gas=auto --from=${{env.AKASH_FROM}}
